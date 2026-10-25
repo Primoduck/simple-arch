@@ -142,8 +142,6 @@ check_uefi() {
 
 # Check for a network connection
 check_network() {
-    log_print "Checking network connectivity.."
-
     if curl -fsS --connect-timeout 5 --max-time 10 $NET_TEST_HOST >/dev/null; then
         p_print "Internet connection confirmed"
     else
@@ -203,7 +201,7 @@ env_check() {
     check_tools
     check_mountpoint
     p_print "All pre-install checks passed!"
-    sleep 3
+    sleep 2
     clear_screen
 }
 
@@ -216,12 +214,13 @@ refresh_mirrors() {
     log_print "...Update mirrors..."
 
     if confirm_yn "Refresh mirrors with reflector?" "n"; then
-        log_print "Refreshing mirrors.."
+        log_print "Refreshing mirrors (This may take a few moments..)"
 
         if reflector --latest 15 --protocol https --age 12 --sort rate --save /etc/pacman.d/mirrorlist; then
             p_print "List preview:"
             echo
             sed -n '2,13p' /etc/pacman.d/mirrorlist || true
+            echo
             confirm_yn "Accpet updated mirrors?" "y" || refresh_mirrors
         else
             err_print "Refresh failed! Using old mirrors"
@@ -332,8 +331,8 @@ prompt_microcode() {
     esac
 
     while true; do
-        printf "${BOLD}${BLUE}[?]${WHITE} %s ${RESET}" "CPU Microcode package:"
-        read -r -p "amd / intel / none [${DETECTED_MICROCODE}] " reply || die "No input received (stdin closed); aborting."
+        printf "${BOLD}${BLUE}[?]${WHITE} %s${RESET}" "CPU Microcode package: amd / intel / none "
+        read -r -p "[${DETECTED_MICROCODE}] " reply || die "No input received (stdin closed); aborting."
         reply="${reply:-$DETECTED_MICROCODE}"
 
         case "$reply" in
@@ -359,6 +358,8 @@ prompt_microcode() {
 
 # Prompt for optional packages
 prompt_extras() {
+    log_print "...Package Selection..."
+    echo
     if confirm_yn "Install essential packages?" "y" " (man-db, man-pages, less, git, curl, wget, rsync)"; then
         INSTALL_ESSENTIALS=true
     fi
@@ -379,8 +380,8 @@ prompt_extras() {
 prompt_efi_size() {
     local reply
     while true; do
-        printf "${BOLD}${BLUE}[?]${WHITE} %s ${RESET}" "EFI system partition size (1 GB minimum):"
-        read -r -p "[${DEFAULT_EFI_SIZE}]: " reply || die "No input received (stdin closed); aborting."
+        printf "${BOLD}${BLUE}[?]${WHITE} %s${RESET}" "EFI system partition size: "
+        read -r -p "[${DEFAULT_EFI_SIZE}]" reply || die "No input received (stdin closed); aborting."
         EFI_SIZE="${reply:-$DEFAULT_EFI_SIZE}"
 
         if [[ "$EFI_SIZE" =~ ^[1-9][0-9]*[KkMmGgTt]$ ]]; then
@@ -504,7 +505,8 @@ prompt_summary() {
 
 # Main function to trigger the rest
 gather_config() {
-    log_print "...System Configuration..."
+    printf "${BOLD}${BLUE}[?]${WHITE} %s${RESET} %s\n" "...System Configuration..." "[defaults]"
+    echo
     prompt_timezone
     prompt_locale
     prompt_hostname
@@ -526,34 +528,46 @@ gather_config() {
 # ---------------
 
 # Display the list of available disks, storing selected path in INSTALL_DISK
-# Using bash built in 'select'.
 select_disk() {
-    local disk
     local disks
-    in_print "Available disks for the installation:"
+    local selection
     mapfile -t disks < <(lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/(sd|nvme|vd)")
 
-    PS3="Please select the number of the corresponding disk (e.g. 1): "
-    select disk in "${disks[@]}"; do
-
-        # Extract just the the path from the string
-        INSTALL_DISK=$(echo "$disk" | awk '{print $1}')
-
-        if [[ ! -b $INSTALL_DISK ]]; then
-            die "Bad selection. Re-run script"
-
-        fi
-        clear_screen
-        p_print "Arch Linux will be installed on the following disk: $INSTALL_DISK"
-        echo
-
-        break
+    in_print "Available disks for installation:"
+    local i=1
+    for disk in "${disks[@]}"; do
+        echo "$i) $disk"
+        ((i++))
     done
+
+    echo
+
+    while :; do
+        printf "${BOLD}${BLUE}[?]${WHITE} %s${RESET}" \
+            "Please select the number of the corresponding disk (e.g. 1): "
+
+        read -r selection
+
+        # check 'selection' is [0-9] and within range of 'disks'
+        if [[ $selection =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#disks[@]} )); then
+            break
+        fi
+
+        err_print "Bad Selection. Try again"
+        echo
+        sleep 1
+    done
+
+    INSTALL_DISK=$(echo "${disks[(( selection - 1 ))]}" | awk '{print $1}')
+
+    if [[ ! -b "$INSTALL_DISK" ]]; then
+        die "Error validating $INSTALL_DISK as block device. Exiting."
+    fi
+    echo
 }
 
 # Destructive confirmation
 confirm_destruction() {
-    log_print "Confirm destructive operation!"
     printf "${BOLD}${YELLOW}[-]${WHITE} %s ${RESET}%s\n" "Selected Disk:" "$INSTALL_DISK"
     echo
 
@@ -909,6 +923,9 @@ main() {
     clear_screen
 
     select_disk
+
+    clear_screen
+
     confirm_destruction
     partition_disk
     format_and_mount
