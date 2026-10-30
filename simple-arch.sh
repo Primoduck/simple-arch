@@ -44,13 +44,16 @@ readonly -a BASE_PACKAGES=(
     zram-generator sudo vim less networkmanager
 )
 
-# Optional "first boot" package sets from the note.
+# Optional "first boot" packages
 readonly -a ESSENTIAL_PACKAGES=(man-db man-pages less git curl wget rsync)
 readonly -a GPU_PACKAGES=(mesa vulkan-radeon vulkan-tools)
 readonly -a PIPEWIRE_PACKAGES=(
     pipewire wireplumber pipewire-audio
     pipewire-alsa pipewire-pulse pipewire-jack
 )
+
+# Track when partitions are mounted
+INSTALL_STARTED=0
 
 # -----------------
 # Helper Functions
@@ -78,25 +81,19 @@ confirm_yn() {
     [[ "${reply,,}" == "y" || "${reply,,}" == "yes" ]]
 }
 
-# Mount cleanup helper
-cleanup_mounts() {
-    echo
-    if grep -q " ${MOUNT_DIR}/" /proc/mounts 2>/dev/null; then
-        log_print "Unmounting filesystems under ${MOUNT_DIR}..."
-        umount -R "$MOUNT_DIR" >/dev/null 2>&1 ||
-            umount -Rl "$MOUNT_DIR" >/dev/null 2>&1 ||
-            err_print "Could not unmount everything under ${MOUNT_DIR}; check 'findmnt -R ${MOUNT_DIR}'."
-    fi
-
-}
-
 # Cleanup mounts on exit
 cleanup() {
-    echo -e "\n\n\n"
-    err_print "Exiting script. Unmounting any drives that were mounted..."
+    echo -e "\n"
 
+    if ((INSTALL_STARTED)); then
+        err_print "Filesystems under ${MOUNT_DIR} left mounted."
+        err_print "Finish unmounting with: umoount -R ${MOUNT_DIR}"
+        return
+    fi
+
+    err_print "Exiting script. Unmounting drives under ${MOUNT_DIR}..."
     umount -R "$MOUNT_DIR" >/dev/null 2>&1 ||
-        umount -Rl "$MOUNT_DIR" >/dev/null 2>&1
+        umount -Rl "$MOUNT_DIR" >/dev/null 2>&1 || true
 }
 
 # Screen clearing helper
@@ -119,7 +116,23 @@ d88P     888 888     '8888P  888  888
     echo
 }
 
-trap cleanup SIGINT SIGTERM ERR
+# Report failing command (Don't unmount)
+on_error() {
+    local exit_code=$?
+    echo
+    err_print "Command failed (exit $exit_code): ${BASH_COMMAND}"
+}
+
+# Exit and stop script on interrupt
+on_interrupt() {
+    echo
+    err_print "Interrupted."
+    cleanup
+    exit 130
+}
+
+trap on_error ERR
+trap on_interrupt INT TERM
 
 # -------------------
 # Environment Checks
@@ -140,18 +153,6 @@ check_uefi() {
     p_print "UEFI system confirmed"
 }
 
-# Check for a network connection
-check_network() {
-    if curl -fsS --connect-timeout 5 --max-time 10 $NET_TEST_HOST >/dev/null; then
-        p_print "Internet connection confirmed"
-    else
-        err_print "No network connectivity!"
-        echo
-        log_print "For Wi-Fi, use iwctl:"
-        die "iwctl  ->  device list  ->  station wlan0 connect <SSID>"
-    fi
-}
-
 # Make sure needed tooling is installed
 check_tools() {
     local -a required=(
@@ -159,7 +160,8 @@ check_tools() {
         mount umount findmnt mountpoint
         pacstrap genfstab arch-chroot
         grep sed awk sort udevadm
-        reflector partprobe
+        reflector partprobe curl
+        chpasswd visudo
 
     )
 
@@ -182,6 +184,18 @@ check_tools() {
     p_print "All required tools available"
 }
 
+# Check for a network connection
+check_network() {
+    if curl -fsS --connect-timeout 5 --max-time 10 $NET_TEST_HOST >/dev/null; then
+        p_print "Internet connection confirmed"
+    else
+        err_print "No network connectivity!"
+        echo
+        log_print "For Wi-Fi, use iwctl:"
+        die "iwctl  ->  device list  ->  station wlan0 connect <SSID>"
+    fi
+}
+
 # Check that "/mnt" is free
 check_mountpoint() {
     if grep -q " ${MOUNT_DIR}/" /proc/mounts 2>/dev/null; then
@@ -197,17 +211,25 @@ env_check() {
     log_print "...Pre-install checks..."
     check_iso
     check_uefi
-    check_network
     check_tools
+    check_network
     check_mountpoint
     p_print "All pre-install checks passed!"
     sleep 2
     clear_screen
 }
 
-# -------------------
-# Mirror list update
-# -------------------
+# -------------------------------
+# Mirror list and keyring update
+# -------------------------------
+
+# Update keyring if needed
+refresh_keyring() {
+    log_print "...Refresh Pacman keyring..."
+    pacman -Sy --needed --noconfirm archlinux-keyring >/dev/null 2>&1 ||
+        die "Could not refresh keyring"
+    echo
+}
 
 # Option to refresh pacman's mirror list with reflector
 refresh_mirrors() {
@@ -228,8 +250,12 @@ refresh_mirrors() {
     else
         log_print "Skipping mirror refresh"
     fi
+    log_print "...Refresh Pacman keyring..."
+    pacman -Sy --needed --noconfirm archlinux-keyring ||
+        die "Could not refresh keyring"
     clear_screen
 }
+
 
 # --------------------------
 # Interactive configuration
@@ -384,11 +410,11 @@ prompt_efi_size() {
         read -r -p "[${DEFAULT_EFI_SIZE}]" reply || die "No input received (stdin closed); aborting."
         EFI_SIZE="${reply:-$DEFAULT_EFI_SIZE}"
 
-        if [[ "$EFI_SIZE" =~ ^[1-9][0-9]*[KkMmGgTt]$ ]]; then
+        if [[ "$EFI_SIZE" =~ ^[1-9][0-9]*[Gg]$ ]]; then
             break
         fi
 
-        log_print "Invalid size (must be at least 1G)"
+        log_print "Invalid size. Enter a whole number of GiB, at least 1 (e.g. 1G, 2G)."
     done
 
     p_print "EFI partition size: ${EFI_SIZE}"
@@ -533,6 +559,10 @@ select_disk() {
     local selection
     mapfile -t disks < <(lsblk -dpno NAME,SIZE,MODEL | grep -E "/dev/(sd|nvme|vd)")
 
+    if ((${#disks[@]} == 0)); then
+        die "No usable disks found (everything is in use or is the live medium)."
+    fi
+
     in_print "Available disks for installation:"
     local i=1
     for disk in "${disks[@]}"; do
@@ -546,7 +576,7 @@ select_disk() {
         printf "${BOLD}${BLUE}[?]${WHITE} %s${RESET}" \
             "Please select the number of the corresponding disk (e.g. 1): "
 
-        read -r selection
+        read -r selection || die "No input received; exiting script."
 
         # check 'selection' is [0-9] and within range of 'disks'
         if [[ $selection =~ ^[0-9]+$ ]] && (( selection >= 1 && selection <= ${#disks[@]} )); then
@@ -569,6 +599,7 @@ select_disk() {
 # Destructive confirmation
 confirm_destruction() {
     printf "${BOLD}${YELLOW}[-]${WHITE} %s ${RESET}%s\n" "Selected Disk:" "$INSTALL_DISK"
+    lsblk -dno NAME,SIZE,MODEL "$INSTALL_DISK"
     echo
 
     printf "${BOLD}${RED}[!!!]${WHITE} %s${RESET}\n" "THE NEXT STEP WILL ERASE ALL DATA ON '${INSTALL_DISK}'."
@@ -781,9 +812,16 @@ EOF
 
     # Services and final configs
     log_print "Configuring services"
+
+    # Set zram defaults (half RAM, capped at 4G)
     printf '[zram0]\n' >"$MOUNT_DIR/etc/systemd/zram-generator.conf"
+    # Enable Network Manager
     chroot_run systemctl enable NetworkManager.service
+    # Enable NTP timesync
+    chroot_run systemctl enable systemd-timesyncd.service
+    # Enable fstrim timer
     chroot_run systemctl enable fstrim.timer
+
     p_print "System configuration complete"
     echo
 }
@@ -883,11 +921,7 @@ finalize() {
     log_print "...Finalizing installation..."
     log_print "Unmounting filesystems under ${MOUNT_DIR}..."
 
-    umount -R "$MOUNT_DIR" ||
-        {
-            err_print "umount -R failed; retrying with lazy unmount."
-            umount -Rl "$MOUNT_DIR" || true
-        }
+    cleanup
 
     cat <<'EOF'
 
@@ -901,8 +935,16 @@ EOF
 
     if confirm_yn "Reboot now?" "n"; then
         echo
+
+        umount -R "$MOUNT_DIR" ||
+            {
+                err_print "umount -R failed; retrying with lazy unmount."
+                umount -Rl "$MOUNT_DIR" || true
+            }
+
         log_print "Rebooting.."
-        sleep 3
+
+        sleep 2
         reboot
     else
         echo
@@ -913,6 +955,7 @@ EOF
 main() {
     clear_screen
     env_check
+    refresh_keyring
     refresh_mirrors
     gather_config
 
@@ -927,6 +970,7 @@ main() {
     clear_screen
 
     confirm_destruction
+    INSTALL_STARTED=1
     partition_disk
     format_and_mount
     install_base
