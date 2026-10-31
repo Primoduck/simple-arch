@@ -34,6 +34,7 @@ ROOT_PASSWORD=""
 USERNAME_VALUE=""
 USER_PASSWORD=""
 
+INSTALL_KVM=false
 INSTALL_ESSENTIALS=false
 INSTALL_GPU=false
 INSTALL_PIPEWIRE=false
@@ -45,6 +46,7 @@ readonly -a BASE_PACKAGES=(
 )
 
 # Optional "first boot" packages
+readonly -a KVM_GUEST_PACKAGES=(spice-vdagent qemu-guest-agent)
 readonly -a ESSENTIAL_PACKAGES=(man-db man-pages less git curl wget rsync)
 readonly -a GPU_PACKAGES=(mesa vulkan-radeon vulkan-tools)
 readonly -a PIPEWIRE_PACKAGES=(
@@ -87,7 +89,7 @@ cleanup() {
 
     if ((INSTALL_STARTED)); then
         err_print "Filesystems under ${MOUNT_DIR} left mounted."
-        err_print "Finish unmounting with: umoount -R ${MOUNT_DIR}"
+        err_print "Finish unmounting with: umount -R ${MOUNT_DIR}"
         return
     fi
 
@@ -346,14 +348,14 @@ prompt_microcode() {
     vendor="$(awk -F': ' '/^vendor_id/{print $2; exit}' /proc/cpuinfo 2>/dev/null || true)"
 
     case "$vendor" in
-    GenuineIntel)
-        log_print "Intel CPU detected"
-        DETECTED_MICROCODE="intel"
-        ;;
-    AuthenticAMD)
-        log_print "AMD CPU detected"
-        DETECTED_MICROCODE="amd"
-        ;;
+        GenuineIntel)
+            log_print "Intel CPU detected"
+            DETECTED_MICROCODE="intel"
+            ;;
+        AuthenticAMD)
+            log_print "AMD CPU detected"
+            DETECTED_MICROCODE="amd"
+            ;;
     esac
 
     while true; do
@@ -382,10 +384,25 @@ prompt_microcode() {
     echo
 }
 
+vm_check() {
+    case "$(systemd-detect-virt)" in
+        kvm)
+            log_print "VM Detected (kvm)"
+            echo
+            if confirm_yn "Install VM guest utilities?" "n"; then
+                INSTALL_KVM=true
+            fi
+            echo
+    esac
+}
+
 # Prompt for optional packages
 prompt_extras() {
     log_print "...Package Selection..."
     echo
+
+    vm_check
+
     if confirm_yn "Install essential packages?" "y" " (man-db, man-pages, less, git, curl, wget, rsync)"; then
         INSTALL_ESSENTIALS=true
     fi
@@ -710,6 +727,10 @@ install_base() {
 
     [[ -n "$MICROCODE_PKG" ]] && packages+=("$MICROCODE_PKG")
 
+    if $INSTALL_KVM; then
+        packages+=("${KVM_GUEST_PACKAGES[@]}")
+    fi
+
     if $INSTALL_ESSENTIALS; then
         packages+=("${ESSENTIAL_PACKAGES[@]}")
     fi
@@ -908,8 +929,8 @@ sanity_checks() {
 
     ((failed == 0)) || die "One or more sanity checks FAILED. Review the output above before rebooting."
 
-    p_print "All sanity checks passed!"
-    sleep 3
+    printf "${BOLD}${GREEN}[?]${WHITE} %s${RESET}" "All sanity checks passed! "
+    read -r -p "- [Press a key]"
 }
 
 # ----------------------
@@ -919,8 +940,6 @@ sanity_checks() {
 finalize() {
     clear_screen
     log_print "...Finalizing installation..."
-    log_print "Unmounting filesystems under ${MOUNT_DIR}..."
-
     cleanup
 
     cat <<'EOF'
