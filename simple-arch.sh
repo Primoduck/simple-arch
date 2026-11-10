@@ -38,6 +38,7 @@ INSTALL_KVM=false
 INSTALL_ESSENTIALS=false
 INSTALL_GPU=false
 INSTALL_PIPEWIRE=false
+DE_SELECTION=""
 
 # Base packages.
 readonly -a BASE_PACKAGES=(
@@ -54,6 +55,27 @@ readonly -a PIPEWIRE_PACKAGES=(
     pipewire-alsa pipewire-pulse pipewire-jack
 )
 
+readonly -a PLASMA_PACKAGES=(
+    plasma-meta
+    konsole
+    dolphin
+    ark
+    kate
+    haruna
+    gwenview
+    firefox
+)
+
+readonly -a HYPR_PACKAGES=(
+    hyprland
+    xdg-desktop-portal-hyprland
+    hyprpolkitagent
+    qt5-wayland
+    qt6-wayland
+    noto-fonts
+    ly
+)
+
 # Track when partitions are mounted
 INSTALL_STARTED=0
 
@@ -66,13 +88,14 @@ p_print() { printf "${BOLD}${GREEN}[*]${WHITE} %s${RESET}\n" "$*"; }
 log_print() { printf "${BOLD}${YELLOW}[-]${WHITE} %s${RESET}\n" "$*"; }
 in_print() { printf "${BOLD}${BLUE}[?]${WHITE} %s${RESET}\n" "$*"; }
 err_print() { printf "${BOLD}${RED}[!]${WHITE} %s${RESET}\n" "$*"; }
+summary_print() { printf "%s${BOLD}${WHITE} %s${RESET}\n" "$@"; }
+
 die() {
     err_print "$*"
     cleanup
     exit 1
 }
 
-summary_print() { printf "%s${BOLD}${WHITE} %s${RESET}\n" "$@"; }
 
 # Confirmation helper
 confirm_yn() {
@@ -240,12 +263,12 @@ refresh_mirrors() {
     if confirm_yn "Refresh mirrors with reflector?" "n"; then
         log_print "Refreshing mirrors (This may take a few moments..)"
 
-        if reflector --latest 15 --protocol https --age 12 --sort rate --save /etc/pacman.d/mirrorlist; then
+        if reflector --latest 15 --protocol https --age 12 --sort rate --save /etc/pacman.d/mirrorlist 2>/dev/null; then
             p_print "List preview:"
             echo
             sed -n '2,13p' /etc/pacman.d/mirrorlist || true
             echo
-            confirm_yn "Accpet updated mirrors?" "y" || refresh_mirrors
+            confirm_yn "Confirm mirrorlist" "y" || refresh_mirrors
         else
             err_print "Refresh failed! Using old mirrors"
         fi
@@ -364,19 +387,19 @@ prompt_microcode() {
         reply="${reply:-$DETECTED_MICROCODE}"
 
         case "$reply" in
-        amd)
-            MICROCODE_PKG="amd-ucode"
-            break
-            ;;
-        intel)
-            MICROCODE_PKG="intel-ucode"
-            break
-            ;;
-        none)
-            MICROCODE_PKG=""
-            break
-            ;;
-        *) log_print "Please answer 'amd', 'intel' or 'none'." ;;
+            amd)
+                MICROCODE_PKG="amd-ucode"
+                break
+                ;;
+            intel)
+                MICROCODE_PKG="intel-ucode"
+                break
+                ;;
+            none)
+                MICROCODE_PKG=""
+                break
+                ;;
+            *) log_print "Please answer 'amd', 'intel' or 'none'." ;;
         esac
     done
 
@@ -393,6 +416,22 @@ vm_check() {
                 INSTALL_KVM=true
             fi
             echo
+    esac
+}
+
+prompt_de() {
+    in_print "Please select the number of the corresponding DE (e.g. 1): "
+    echo
+    printf "1) %s\n2) %s\n\n" "KDE Plasma" "Hyprland"
+    read -r reply || die "No input received (stdin closed); aborting."
+
+    case $reply in
+        "1")
+            DE_SELECTION="KDE Plasma"
+            ;;
+        "2")
+            DE_SELECTION="Hyprland"
+            ;;
     esac
 }
 
@@ -417,6 +456,11 @@ prompt_extras() {
         INSTALL_PIPEWIRE=true
     fi
     echo
+
+    if confirm_yn "Install DE?" "n" " (KDE Plasma, Hyprland)"; then
+        echo
+        prompt_de
+    fi
 }
 
 # Prompt for EFI size
@@ -543,6 +587,10 @@ prompt_summary() {
     else
         echo -e "Pipewire audio packages selected: ${GREEN}${BOLD}YES${RESET}"
     fi
+
+    if [[ -n $DE_SELECTION ]]; then
+        echo -e "Desktop Environment selected: ${GREEN}${BOLD}$DE_SELECTION${RESET}"
+    fi
     echo
 }
 
@@ -631,7 +679,7 @@ confirm_destruction() {
     [[ "$ack" == "$INSTALL_DISK" ]] || die "Aborted: confirmation did not match '${INSTALL_DISK}'. No changes were made."
 
     p_print "Disk selection confirmed. ${INSTALL_DISK} will be formatted"
-    echo
+    clear_screen
 }
 
 # ------------------
@@ -642,7 +690,6 @@ confirm_destruction() {
 # with: 1) EFI System Partition (ef00), ${EFI_SIZE}; 2) Linux FS (8300), rest.
 partition_disk() {
     log_print "...Partitioning ${INSTALL_DISK}..."
-    echo
 
     sgdisk --zap-all "$INSTALL_DISK" >/dev/null
     sgdisk -n "1:0:+${EFI_SIZE}" -t 1:ef00 -c 1:EFI "$INSTALL_DISK" >/dev/null
@@ -658,9 +705,7 @@ partition_disk() {
 
     resolve_partitions
 
-    p_print "Partitioning complete: ${INSTALL_DISK} now has a ${EFI_SIZE} EFI partition and a Linux partition."
-    echo "    - EFI = ${EFI_PART}"
-    echo "    - Linux = ${LINUX_PART}"
+    p_print "Partitioning complete"
     echo
 }
 
@@ -684,7 +729,6 @@ resolve_partitions() {
 # DESTRUCTIVE: creates new filesystems, erasing anything previously on these partitions.
 format_and_mount() {
     log_print "...Formatting and mounting..."
-    echo
 
     log_print "Formatting EFI partition ${EFI_PART} as FAT32.."
     mkfs.fat -F32 "$EFI_PART" >/dev/null
@@ -696,8 +740,6 @@ format_and_mount() {
     mount "$LINUX_PART" "$MOUNT_DIR"
     btrfs subvolume create "$MOUNT_DIR/@" >/dev/null
     btrfs subvolume create "$MOUNT_DIR/@home" >/dev/null
-    # btrfs subvolume list "$MOUNT_DIR"
-    echo
 
     # Unmount the temporary mount before mounting the subvolumes.
     umount "$MOUNT_DIR"
@@ -710,8 +752,7 @@ format_and_mount() {
     log_print "Mounting EFI partition.."
     mount "$EFI_PART" "$MOUNT_DIR/efi"
 
-    # p_print "Mount points:"
-    # findmnt -R "$MOUNT_DIR"
+    p_print "Formatting and mounting complete"
     echo
 }
 
@@ -722,7 +763,6 @@ format_and_mount() {
 install_base() {
     log_print "...Base installation..."
     log_print "This may take some time.."
-    echo
     local -a packages=("${BASE_PACKAGES[@]}")
 
     [[ -n "$MICROCODE_PKG" ]] && packages+=("$MICROCODE_PKG")
@@ -743,9 +783,9 @@ install_base() {
         packages+=("${PIPEWIRE_PACKAGES[@]}")
     fi
 
-    local pkg_list_str=""
-    printf -v pkg_list_str '%s ' "${packages[@]}"
-    printf "${BOLD}${YELLOW}[-]${WHITE} %s ${RESET}%s\n" "Installing Packages:" "$pkg_list_str"
+    # local pkg_list_str=""
+    # printf -v pkg_list_str '%s ' "${packages[@]}"
+    # printf "${BOLD}${YELLOW}[-]${WHITE} %s ${RESET}%s\n" "Installing Packages:" "$pkg_list_str"
 
     # Install the base system
     pacstrap -K "$MOUNT_DIR" "${packages[@]}" >/dev/null 2>&1 || die "pacstrap failed."
@@ -872,8 +912,39 @@ install_bootloader() {
     chroot_run grub-mkconfig -o /boot/grub/grub.cfg >/dev/null 2>&1 ||
         die "grub-mkconfig failed. Verify kernel images exist in /boot of the target (ls ${MOUNT_DIR}/boot)."
 
-    log_print "GRUB installed and configured"
+    p_print "GRUB installed and configured"
     echo
+}
+
+# ---------------
+# DE Installaton
+# ---------------
+
+install_de() {
+    if [[ -z $DE_SELECTION ]]; then
+        return
+    fi
+
+    local packages
+    case $DE_SELECTION in
+        "KDE Plasma")
+            packages+=("${PLASMA_PACKAGES[@]}")
+            log_print "...Installing KDE Plasma..."
+            chroot_run pacman -S --needed --noconfirm "${packages[@]}" >/dev/null 2>&1 || die "KDE Plasma download failed."
+            chroot_run systemctl enable plasmalogin.service
+            p_print "KDE Plasma installed"
+            echo
+            ;;
+        "Hyprland")
+            packages+=("${HYPR_PACKAGES[@]}")
+            log_print "...Installing Hyprland..."
+            chroot_run pacman -S --needed --noconfirm "${packages[@]}" >/dev/null 2>&1 || die "Hyprland download failed."
+            chroot_run systemctl enable ly@tty1.service
+            chroot_run systemctl disable getty@tty1.service
+            p_print "Hyprland Installed"
+            echo
+            ;;
+    esac
 }
 
 # --------------
@@ -883,27 +954,21 @@ install_bootloader() {
 sanity_checks() {
     log_print "...Pre-boot sanity checks..."
     local failed=0
-    echo
 
-    log_print "Mounts under ${MOUNT_DIR}:"
-    findmnt -R "$MOUNT_DIR" || failed=1
-    echo
+    log_print "Verify mounts under ${MOUNT_DIR}"
+    findmnt -R "$MOUNT_DIR" >/dev/null || failed=1
 
-    # log_print "Filesystems:"
-    # lsblk -f || failed=1
-    # echo
+    log_print "Verify Filesystems"
+    lsblk -f >/dev/null || failed=1
 
-    # log_print "fstab:"
-    # cat "$MOUNT_DIR/etc/fstab" || failed=1
-    # echo
+    log_print "Verify fstab"
+    cat "$MOUNT_DIR/etc/fstab" >/dev/null || failed=1
 
-    log_print "Testing fstab with 'mount -a' in the chroot.."
+    log_print "Testing fstab in chroot.."
     chroot_run mount -a || {
         err_print "mount -a failed - fstab is not usable."
         failed=1
     }
-    p_print "fstab success"
-    echo
 
     findmnt "$MOUNT_DIR/efi" >/dev/null || {
         err_print "The EFI partition is not mounted at /efi."
@@ -996,6 +1061,7 @@ main() {
     generate_fstab
     configure_system
     install_bootloader
+    install_de
     sanity_checks
     finalize
 }
