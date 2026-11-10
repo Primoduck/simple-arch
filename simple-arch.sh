@@ -74,6 +74,8 @@ readonly -a HYPR_PACKAGES=(
     qt6-wayland
     noto-fonts
     ly
+    foot
+    firefox
 )
 
 # Track when partitions are mounted
